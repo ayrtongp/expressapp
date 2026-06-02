@@ -10,7 +10,6 @@ import { buildPendenciasAdmMensagem } from '../services/PendenciasAdmService';
 import { buildFeridasAbertasMensagem } from '../services/FeridasAbertasService';
 import * as AiController from '../controller/ai.controller';
 import r2Routes from '../r2/routes';
-import { downloadFolhaPontoZip } from '../controller/rhFolhaPonto.controller';
 
 const router = Router();
 const upload = multer({ storage: multer.memoryStorage() });
@@ -19,8 +18,6 @@ const upload = multer({ storage: multer.memoryStorage() });
 // Rotas definidas em src/r2/routes.ts
 router.use(r2Routes);
 
-// ------------------- RH -------------------
-router.get('/rh/folha-ponto/zip', downloadFolhaPontoZip);
 
 // ------------------- IA -------------------
 router.post('/ai/complete', express.json({ limit: '10mb' }), AiController.complete);
