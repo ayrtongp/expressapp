@@ -5,6 +5,9 @@ import { findElimAusenteService } from '../services/ElimAusenteService';
 import { findSemEvolucao7dService } from '../services/FindSemEvolucao7dService';
 import { buildSegundaFeiraMensagem } from '../services/SegundaFeiraBomDiaService';
 import { buildPendenciasAdmMensagem } from '../services/PendenciasAdmService';
+import { buildFeridasAbertasMensagem } from '../services/FeridasAbertasService';
+import { gerarTitulosRecorrenciaService } from '../services/GerarTitulosRecorrenciaService';
+import { buildFolhaPontoAvisoMensagem, ehDiaDeEnviarAvisoFolha } from '../services/FolhaPontoAvisoService';
 import formatarData from '../utils/funcoes/formatarData';
 import formatarNome from '../utils/funcoes/formatarNome';
 
@@ -43,7 +46,22 @@ export default function initCronJobs(app: Application): void {
     { timezone: 'America/Sao_Paulo' }
   );
 
-  // 2) Pendências ADM seg-sex às 10h
+  // 2) Monitoramento de feridas abertas — segunda-feira às 08:30
+  cron.schedule(
+    '0 14 * * 1',
+    async () => {
+      try {
+        const msg = await buildFeridasAbertasMensagem(db);
+        await sendMessage(process.env.WPP_GROUP_TECNICOS!, msg);
+        console.log('✅ [Feridas] Monitoramento enviado');
+      } catch (err) {
+        console.error('❌ Erro no cron feridas:', err);
+      }
+    },
+    { timezone: 'America/Sao_Paulo' }
+  );
+
+  // 3) Pendências ADM seg-sex às 10h
   cron.schedule(
     '0 10 * * 1-5',
     async () => {
@@ -124,6 +142,40 @@ export default function initCronJobs(app: Application): void {
         }
       } catch (err) {
         console.error('❌ Erro no cronjob residentes (08:35):', err);
+      }
+    },
+    { timezone: 'America/Sao_Paulo' }
+  );
+
+  // Geração de títulos de recorrências — todo dia às 06:00 (SP)
+  cron.schedule(
+    '0 6 * * *',
+    async () => {
+      try {
+        const { criados, ignorados } = await gerarTitulosRecorrenciaService(db);
+        console.log(`✅ [Recorrências] ${criados} título(s) criado(s), ${ignorados} já existia(m)`);
+      } catch (err) {
+        console.error('❌ Erro no cron de recorrências:', err);
+      }
+    },
+    { timezone: 'America/Sao_Paulo' }
+  );
+
+  // Aviso folha de ponto — dias úteis 2 a 5 do mês às 08:00 (referente ao mês anterior)
+  cron.schedule(
+    '0 8 * * *',
+    async () => {
+      try {
+        if (!ehDiaDeEnviarAvisoFolha()) return;
+        const msg = await buildFolhaPontoAvisoMensagem(db);
+        if (!msg) {
+          console.log('✅ [Folha de Ponto] Todos os funcionários enviaram.');
+          return;
+        }
+        await sendMessage(process.env.WPP_GROUP_GRUPAO!, msg);
+        console.log('✅ [Folha de Ponto] Aviso de pendências enviado ao Grupão');
+      } catch (err) {
+        console.error('❌ Erro no cron folha de ponto:', err);
       }
     },
     { timezone: 'America/Sao_Paulo' }

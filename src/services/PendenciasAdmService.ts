@@ -107,5 +107,30 @@ export async function buildPendenciasAdmMensagem(db: Db): Promise<string> {
     linhas.push('✅ Todos os funcionários CLT estão com dados completos.');
   }
 
+  // --- Listas de compras vencidas ---
+  const hoje = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+  const listasVencidas = await db
+    .collection('listas_compras')
+    .find({
+      data: { $lt: hoje },
+      status: { $ne: 'comprada' },
+      ativo: { $ne: false },
+    })
+    .project({ tipo: 1, titulo: 1, data: 1 })
+    .sort({ data: 1 })
+    .toArray();
+
+  linhas.push('');
+  if (listasVencidas.length > 0) {
+    linhas.push(`*Listas de compras vencidas* (${listasVencidas.length}):`);
+    for (const l of listasVencidas) {
+      const [ano, mes, dia] = l.data.split('-');
+      const tipo = l.tipo.charAt(0).toUpperCase() + l.tipo.slice(1);
+      linhas.push(`  • ${dia}/${mes}/${ano} — ${tipo}: ${l.titulo}`);
+    }
+  } else {
+    linhas.push('✅ Nenhuma lista de compras vencida.');
+  }
+
   return linhas.join('\n');
 }

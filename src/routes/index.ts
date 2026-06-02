@@ -2,29 +2,25 @@ import { Router } from 'express';
 import multer from 'multer';
 import express from 'express';
 import type { Application } from 'express';
-import * as FileController from '../controller/file.controller';
 import { convertDocxToPdf } from '../controller/docxToPDF.controller';
 import * as PortaoController from '../controller/portao.controller';
 import { getGroups } from '../api/Whatsapp.js/index';
 import { buildSegundaFeiraMensagem } from '../services/SegundaFeiraBomDiaService';
 import { buildPendenciasAdmMensagem } from '../services/PendenciasAdmService';
+import { buildFeridasAbertasMensagem } from '../services/FeridasAbertasService';
 import * as AiController from '../controller/ai.controller';
 import r2Routes from '../r2/routes';
+import { downloadFolhaPontoZip } from '../controller/rhFolhaPonto.controller';
 
 const router = Router();
 const upload = multer({ storage: multer.memoryStorage() });
 
-// ------------------- GCS (legado) -------------------
-router.get('/files', FileController.getListFiles);
-router.get('/listBuckets', FileController.listBuckets);
-router.get('/files/:name', FileController.download);
-router.post('/upload', FileController.upload);
-router.post('/criarBucket', FileController.criarBucket);
-router.delete('/delete', FileController.deleteFile);
-
 // ------------------- CLOUDFLARE R2 + MONGODB -------------------
 // Rotas definidas em src/r2/routes.ts
 router.use(r2Routes);
+
+// ------------------- RH -------------------
+router.get('/rh/folha-ponto/zip', downloadFolhaPontoZip);
 
 // ------------------- IA -------------------
 router.post('/ai/complete', express.json({ limit: '10mb' }), AiController.complete);
@@ -47,6 +43,18 @@ router.post('/whatsapp/segunda-feira/teste', express.json(), async (req, res) =>
     const db = req.app.locals['db'];
     const msg = await buildSegundaFeiraMensagem(db);
     const destino = process.env.WPP_GROUP_GRUPAO!;
+    await (await import('../api/Whatsapp.js/index')).sendMessage(destino, msg);
+    res.json({ ok: true, destino, preview: msg });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.post('/whatsapp/feridas/teste', express.json(), async (req, res) => {
+  try {
+    const db = req.app.locals['db'];
+    const msg = await buildFeridasAbertasMensagem(db);
+    const destino = process.env.WPP_GROUP_TECNICOS!;
     await (await import('../api/Whatsapp.js/index')).sendMessage(destino, msg);
     res.json({ ok: true, destino, preview: msg });
   } catch (err: any) {
