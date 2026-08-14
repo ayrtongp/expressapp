@@ -38,6 +38,11 @@ async function bootstrap(): Promise<void> {
 
   app.locals['db'] = db;
 
+  // Endpoint independente de banco e integrações externas para o Docker/proxy.
+  app.get('/health', (_req, res) => {
+    res.status(200).json({ ok: true, service: 'lar-felizidade-api' });
+  });
+
   initRoutes(app);
 
   if (process.env.ENABLE_PORTAO_MQTT === 'true') {
