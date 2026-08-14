@@ -49,10 +49,15 @@ async function bootstrap(): Promise<void> {
     require('./src/services/mqtt');
   }
 
-  try {
-    cronJobs(app);
-  } catch (err) {
-    console.error('❌ Erro ao configurar cronJobs:', err);
+  // Durante a migração, mantenha false para não duplicar tarefas do App Platform.
+  if (process.env.ENABLE_CRON !== 'false') {
+    try {
+      cronJobs(app);
+    } catch (err) {
+      console.error('❌ Erro ao configurar cronJobs:', err);
+    }
+  } else {
+    console.log('⏸️ Cron jobs desabilitados por ENABLE_CRON=false');
   }
 
   const port = process.env.PORT || 8080;
