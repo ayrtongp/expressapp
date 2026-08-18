@@ -1,15 +1,22 @@
 import 'dotenv/config';
 import cors from 'cors';
 import express from 'express';
-import type { Application } from 'express';
+import type { Application, ErrorRequestHandler } from 'express';
 import cronJobs from './src/cronJobs';
 import initRoutes from './src/routes';
 import { connect } from './src/config/mongoDB';
 
 async function bootstrap(): Promise<void> {
+  if (!process.env.JWT_SECRET?.trim()) {
+    throw new Error('JWT_SECRET obrigatorio para iniciar a API.');
+  }
+
   const db = await connect();
 
   const app: Application = express();
+
+  // Somente o Caddy local e os proxies gerenciados podem definir o IP do cliente.
+  app.set('trust proxy', 'loopback');
 
   const WHITELIST = [
     'https://www.larfelizidade.com.br',
@@ -44,6 +51,12 @@ async function bootstrap(): Promise<void> {
   });
 
   initRoutes(app);
+
+  const errorHandler: ErrorRequestHandler = (error, _req, res, _next) => {
+    console.error('[http] erro nao tratado:', error);
+    res.status(500).json({ ok: false, error: 'Erro interno.' });
+  };
+  app.use(errorHandler);
 
   if (process.env.ENABLE_PORTAO_MQTT === 'true') {
     require('./src/services/mqtt');

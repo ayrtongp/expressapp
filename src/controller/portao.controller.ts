@@ -83,9 +83,10 @@ function getMqttHealthState() {
 
 export async function abrir(req: Request, res: Response): Promise<void> {
   try {
-    const { userId, ms = 300 } = req.body as { userId: string; ms?: number };
+    const userId = req.auth?.userId;
+    const { ms = 300 } = req.body as { ms?: number };
     if (!userId) {
-      res.status(400).json({ ok: false, error: 'userId obrigatório' });
+      res.status(401).json({ ok: false, error: 'Autenticacao necessaria.' });
       return;
     }
 

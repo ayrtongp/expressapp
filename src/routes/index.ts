@@ -1,5 +1,4 @@
 import { Router } from 'express';
-import multer from 'multer';
 import express from 'express';
 import type { Application } from 'express';
 import * as PortaoController from '../controller/portao.controller';
@@ -9,20 +8,21 @@ import { buildPendenciasAdmMensagem } from '../services/PendenciasAdmService';
 import { buildFeridasAbertasMensagem } from '../services/FeridasAbertasService';
 import * as AiController from '../controller/ai.controller';
 import r2Routes from '../r2/routes';
+import { requireAnyGroup, requireAuth } from '../middleware/auth';
+import { aiRateLimit, portaoRateLimit } from '../middleware/rateLimit';
 
 const router = Router();
-const upload = multer({ storage: multer.memoryStorage() });
 
 // ------------------- CLOUDFLARE R2 + MONGODB -------------------
 // Rotas definidas em src/r2/routes.ts
-router.use(r2Routes);
+router.use(requireAuth, r2Routes);
 
 
 // ------------------- IA -------------------
-router.post('/ai/complete', express.json({ limit: '10mb' }), AiController.complete);
+router.post('/ai/complete', aiRateLimit, requireAuth, express.json({ limit: '10mb' }), AiController.complete);
 
 // ------------------- WHATSAPP DEBUG -------------------
-router.get('/whatsapp/groups', async (_req, res) => {
+router.get('/whatsapp/groups', requireAuth, requireAnyGroup('administrativo'), async (_req, res) => {
   try {
     const data = await getGroups();
     res.json(data);
@@ -31,7 +31,7 @@ router.get('/whatsapp/groups', async (_req, res) => {
   }
 });
 
-router.post('/whatsapp/segunda-feira/teste', express.json(), async (req, res) => {
+router.post('/whatsapp/segunda-feira/teste', requireAuth, requireAnyGroup('administrativo'), express.json(), async (req, res) => {
   try {
     const db = req.app.locals['db'];
     const msg = await buildSegundaFeiraMensagem(db);
@@ -43,7 +43,7 @@ router.post('/whatsapp/segunda-feira/teste', express.json(), async (req, res) =>
   }
 });
 
-router.post('/whatsapp/feridas/teste', express.json(), async (req, res) => {
+router.post('/whatsapp/feridas/teste', requireAuth, requireAnyGroup('administrativo'), express.json(), async (req, res) => {
   try {
     const db = req.app.locals['db'];
     const msg = await buildFeridasAbertasMensagem(db);
@@ -55,7 +55,7 @@ router.post('/whatsapp/feridas/teste', express.json(), async (req, res) => {
   }
 });
 
-router.post('/whatsapp/pendencias-adm/teste', express.json(), async (req, res) => {
+router.post('/whatsapp/pendencias-adm/teste', requireAuth, requireAnyGroup('administrativo'), express.json(), async (req, res) => {
   try {
     const db = req.app.locals['db'];
     const msg = await buildPendenciasAdmMensagem(db);
@@ -68,17 +68,17 @@ router.post('/whatsapp/pendencias-adm/teste', express.json(), async (req, res) =
 });
 
 // ------------------- PORTÃO ESP8266 -------------------
-router.post('/portao/abrir', PortaoController.abrir);   // body: { userId, ms? }
-router.get('/portao/logs', PortaoController.logs);      // query: deviceId, limit
-router.get('/portao/health/mqtt/live', PortaoController.mqttHealthLiveness);
-router.get('/portao/health/mqtt/ready', PortaoController.mqttHealthReadiness);
-router.get('/portao/health/mqtt', PortaoController.mqttHealthReadiness);
-router.get('/portao/debug/mqtt/status', PortaoController.mqttDebugStatus);
-router.get('/portao/debug/mqtt/events', PortaoController.mqttDebugEvents);
-router.post('/portao/debug/mqtt/publish', PortaoController.mqttDebugPublish);
-router.post('/portao/debug/mqtt/wait-message', PortaoController.mqttDebugWaitMessage);
-router.post('/portao/debug/mqtt/wait-ack', PortaoController.mqttDebugWaitAck);
-router.post('/portao/debug/mqtt/press', PortaoController.mqttDebugPress);
+router.post('/portao/abrir', portaoRateLimit, requireAuth, requireAnyGroup('portao_lar'), PortaoController.abrir);
+router.get('/portao/logs', requireAuth, requireAnyGroup('administrativo'), PortaoController.logs);
+router.get('/portao/health/mqtt/live', requireAuth, requireAnyGroup('administrativo'), PortaoController.mqttHealthLiveness);
+router.get('/portao/health/mqtt/ready', requireAuth, requireAnyGroup('administrativo'), PortaoController.mqttHealthReadiness);
+router.get('/portao/health/mqtt', requireAuth, requireAnyGroup('administrativo'), PortaoController.mqttHealthReadiness);
+router.get('/portao/debug/mqtt/status', requireAuth, requireAnyGroup('administrativo'), PortaoController.mqttDebugStatus);
+router.get('/portao/debug/mqtt/events', requireAuth, requireAnyGroup('administrativo'), PortaoController.mqttDebugEvents);
+router.post('/portao/debug/mqtt/publish', requireAuth, requireAnyGroup('administrativo'), PortaoController.mqttDebugPublish);
+router.post('/portao/debug/mqtt/wait-message', requireAuth, requireAnyGroup('administrativo'), PortaoController.mqttDebugWaitMessage);
+router.post('/portao/debug/mqtt/wait-ack', requireAuth, requireAnyGroup('administrativo'), PortaoController.mqttDebugWaitAck);
+router.post('/portao/debug/mqtt/press', requireAuth, requireAnyGroup('administrativo'), PortaoController.mqttDebugPress);
 
 export default (app: Application): void => { app.use(router); };
 
