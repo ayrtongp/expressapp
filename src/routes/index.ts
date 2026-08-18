@@ -2,7 +2,6 @@ import { Router } from 'express';
 import multer from 'multer';
 import express from 'express';
 import type { Application } from 'express';
-import { convertDocxToPdf } from '../controller/docxToPDF.controller';
 import * as PortaoController from '../controller/portao.controller';
 import { getGroups } from '../api/Whatsapp.js/index';
 import { buildSegundaFeiraMensagem } from '../services/SegundaFeiraBomDiaService';
@@ -21,9 +20,6 @@ router.use(r2Routes);
 
 // ------------------- IA -------------------
 router.post('/ai/complete', express.json({ limit: '10mb' }), AiController.complete);
-
-// ------------------- Conversão DOCX → PDF -------------------
-router.post('/convert-docx-to-pdf', upload.single('file'), convertDocxToPdf);
 
 // ------------------- WHATSAPP DEBUG -------------------
 router.get('/whatsapp/groups', async (_req, res) => {
@@ -85,3 +81,4 @@ router.post('/portao/debug/mqtt/wait-ack', PortaoController.mqttDebugWaitAck);
 router.post('/portao/debug/mqtt/press', PortaoController.mqttDebugPress);
 
 export default (app: Application): void => { app.use(router); };
+

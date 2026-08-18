@@ -38,7 +38,7 @@ async function bootstrap(): Promise<void> {
 
   app.locals['db'] = db;
 
-  // Endpoint independente de banco e integrações externas para o Docker/proxy.
+  // O processo só começa a escutar depois que a conexão com o banco é validada.
   app.get('/health', (_req, res) => {
     res.status(200).json({ ok: true, service: 'lar-felizidade-api' });
   });
@@ -50,7 +50,7 @@ async function bootstrap(): Promise<void> {
   }
 
   // Durante a migração, mantenha false para não duplicar tarefas do App Platform.
-  if (process.env.ENABLE_CRON !== 'false') {
+  if (process.env.ENABLE_CRON === 'true') {
     try {
       cronJobs(app);
     } catch (err) {
@@ -70,3 +70,4 @@ bootstrap().catch(err => {
   console.error('❌ Erro ao iniciar a aplicação:', err);
   process.exit(1);
 });
+

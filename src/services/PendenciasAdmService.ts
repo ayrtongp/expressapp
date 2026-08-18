@@ -53,8 +53,12 @@ export async function buildPendenciasAdmMensagem(db: Db): Promise<string> {
   }
 
   // Buscar usuarios para nome + foto
-  const userIds = clts.map(c => c.usuarioId?.toString()).filter(Boolean);
-  const objIds = userIds.map(id => { try { return new ObjectId(id); } catch { return null; } }).filter(Boolean);
+  const userIds: string[] = clts.flatMap(c =>
+    c.usuarioId ? [c.usuarioId.toString()] : []
+  );
+  const objIds: ObjectId[] = userIds.flatMap(id =>
+    ObjectId.isValid(id) ? [new ObjectId(id)] : []
+  );
 
   const usuarios = await db
     .collection('usuario')
@@ -134,3 +138,4 @@ export async function buildPendenciasAdmMensagem(db: Db): Promise<string> {
 
   return linhas.join('\n');
 }
+
