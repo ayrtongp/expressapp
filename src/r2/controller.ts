@@ -31,6 +31,9 @@ export async function handleUpload(req: Request, res: Response): Promise<void> {
       return;
     }
 
+    // A autoria vem da identidade validada, nunca de um campo controlado pelo cliente.
+    req.body.createdBy = req.auth!.userId;
+
     const result = await uploadFile({
       fileBuffer: req.file.buffer,
       mimetype: req.file.mimetype,
