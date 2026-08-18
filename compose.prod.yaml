@@ -24,10 +24,8 @@ services:
       NODE_ENV: production
       NODE_OPTIONS: --max-old-space-size=384
       PORT: 8080
-    expose:
-      - "8080"
-    networks:
-      - proxy
+    ports:
+      - "127.0.0.1:8080:8080"
     healthcheck:
       test:
         - CMD
@@ -43,9 +41,3 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
-
-networks:
-  proxy:
-    external: true
-    name: proxy
-
