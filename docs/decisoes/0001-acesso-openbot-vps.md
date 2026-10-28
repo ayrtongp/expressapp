@@ -20,5 +20,5 @@ Opção B.
 ## Consequências
 - `ps` e `logs` são livres. `restart` e `up` são deploy e exigem aprovação do Ayrton.
 - Para incluir um app novo, editar o `case` do script como root.
-- Pendente: o script precisa incluir `-f compose.hostinger.yaml`.
+- Script corrigido para `-f compose.prod.yaml -f compose.hostinger.yaml` (2026-10-28).
 - Para revogar: `gpasswd -d openbot apps` e `rm /etc/sudoers.d/openbot-app`.

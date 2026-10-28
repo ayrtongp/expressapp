@@ -6,7 +6,7 @@ O status geral do projeto fica em `ayrtongp/larfelizidademarica` → `docs/STATU
 ## Problemas
 - A produção roda de `chore/droplet-migration`, que ainda não teve merge em `main`.
 - O `compose.hostinger.yaml` (override de produção) está só na VPS, sem versionamento.
-- O script `openbot-app` ignora o override, então não usar `up`/`restart` até corrigir.
+- Script `openbot-app` já usa os dois composes (corrigido em 2026-10-28).
 - Não há testes, e o README é o do template "bezkoder".
 
 ## Produção
