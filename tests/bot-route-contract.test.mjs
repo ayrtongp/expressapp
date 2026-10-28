@@ -88,3 +88,61 @@ test('router real: contexto/medição com DB mockado e recusados sem insert', as
     assert.equal(inserts, measurementStatus === 201 ? 1 : 0, `${name}: rejected request inserted data`);
   }
 });
+
+test('medições: cada um dos 9 tipos grava com type_code/unit corretos, respeita limites e é idempotente', async () => {
+  const employeeId = new ObjectId();
+  const residentId = new ObjectId();
+  const token = 'integration-test-token';
+  const typeCases = [
+    ['pressao', '120/80', [['BP_SYS', 'mmHg', 120], ['BP_DIA', 'mmHg', 80]], '300/80'],
+    ['glicemia', '110', [['GLUCOSE', 'mg/dL', 110]], '900'],
+    ['temperatura', '36,5', [['TEMP', '°C', 36.5]], '50'],
+    ['saturacao', '98', [['SPO2', '%', 98]], '10'],
+    ['frequencia_cardiaca', '72', [['HR', 'bpm', 72]], '400'],
+    ['frequencia_respiratoria', '16', [['RR', 'ipm', 16]], '100'],
+    ['peso', '68,4', [['WEIGHT', 'kg', 68.4]], '500'],
+    ['dor', '5', [['PAIN_SCORE', '/10', 5]], '15'],
+    ['diurese', '1200', [['DIURESIS', 'ml', 1200]], '9999'],
+  ];
+  for (const [type, validValue, expected, invalidValue] of typeCases) {
+    let insertedDocs = [];
+    let sessionCreated = 0;
+    const sessionId = new ObjectId();
+    const db = { collection(name) {
+      if (name === 'usuario') return { findOne: async (q) => q._id?.equals?.(employeeId) ? { _id: employeeId, admin: 'S' } : null };
+      if (name === 'grupos_usuario') return { find: () => ({ project: () => ({ toArray: async () => [{ id_grupo: new ObjectId('507f1f77bcf86cd799439011') }] }) }) };
+      if (name === 'grupos') return { find: () => ({ project: () => ({ toArray: async () => [{ cod_grupo: 'medicina' }] }) }) };
+      if (name === 'patient') return { findOne: async () => ({ _id: residentId, display_name: 'Residente Teste' }) };
+      if (name === 'measurement_session') return { findOneAndUpdate: async () => { sessionCreated += 1; return { value: { _id: sessionId, created_at: new Date().toISOString() }, lastErrorObject: { upserted: sessionCreated === 1 ? sessionId : undefined } }; } };
+      if (name === 'measurement') return { insertMany: async (docs) => { insertedDocs = docs; } };
+      throw new Error(`collection inesperada: ${name}`);
+    }};
+    const app = express(); app.use(express.json()); app.locals.db = db; app.use('/api/bot', botRouter);
+    const server = createServer(app); await new Promise((resolve) => server.listen(0, resolve));
+    const base = `http://127.0.0.1:${server.address().port}`;
+    process.env.BOT_SERVICE_TOKEN = token;
+    const post = (value) => fetch(`${base}/api/bot/measurements`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ employeeId: String(employeeId), residentId: String(residentId), type, value, measuredAt: '2026-01-01T10:00:00.000Z' }) });
+    const ok = await post(validValue);
+    assert.equal(ok.status, 201, `${type}: valor valido`);
+    assert.equal(insertedDocs.length, expected.length, `${type}: quantidade de documentos`);
+    for (const [code, unit, numeric] of expected) {
+      const doc = insertedDocs.find((d) => d.type_code === code);
+      assert.ok(doc, `${type}: documento ${code} ausente`);
+      assert.equal(doc.unit, unit, `${type}: unit de ${code}`);
+      assert.equal(doc.value_numeric, numeric, `${type}: value_numeric de ${code}`);
+    }
+    const repeat = await post(validValue);
+    assert.equal(repeat.status, 200, `${type}: repeticao idempotente`);
+    assert.equal(insertedDocs.length, expected.length, `${type}: repeticao nao duplica`);
+    const invalid = await post(invalidValue);
+    assert.equal(invalid.status, 400, `${type}: valor fora do limite`);
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('documentação lista os 9 tipos de medição com type_code e unit do catálogo', () => {
+  const docs = fs.readFileSync(new URL('../docs/BOT-API.md', import.meta.url), 'utf8');
+  for (const code of ['BP_SYS', 'BP_DIA', 'GLUCOSE', 'TEMP', 'SPO2', 'HR', 'RR', 'WEIGHT', 'PAIN_SCORE', 'DIURESIS']) {
+    assert.match(docs, new RegExp(code), `docs devem citar ${code}`);
+  }
+});

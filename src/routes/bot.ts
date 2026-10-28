@@ -4,6 +4,18 @@ import { requireBotToken } from '../middleware/botAuth';
 const router = Router();
 const CONTEXT_GROUPS = new Set(['medicina', 'equipe_enfermagem', 'coordenacao', 'financeiro']);
 const MEASUREMENT_GROUPS = new Set(['medicina', 'equipe_enfermagem', 'coordenacao']);
+type SingleMeasurementType = { code: string; label: string; unit: string; min: number; max: number; integer?: boolean };
+const SINGLE_VALUE_TYPES: Record<string, SingleMeasurementType> = {
+  glicemia: { code: 'GLUCOSE', label: 'Glicemia', unit: 'mg/dL', min: 20, max: 700 },
+  temperatura: { code: 'TEMP', label: 'Temperatura', unit: '°C', min: 30, max: 43 },
+  saturacao: { code: 'SPO2', label: 'Saturação O₂', unit: '%', min: 50, max: 100 },
+  frequencia_cardiaca: { code: 'HR', label: 'Freq. Cardíaca', unit: 'bpm', min: 20, max: 300 },
+  frequencia_respiratoria: { code: 'RR', label: 'Freq. Respiratória', unit: 'ipm', min: 4, max: 60 },
+  peso: { code: 'WEIGHT', label: 'Peso', unit: 'kg', min: 20, max: 300 },
+  dor: { code: 'PAIN_SCORE', label: 'Escala de Dor (EVA)', unit: '/10', min: 0, max: 10, integer: true },
+  diurese: { code: 'DIURESIS', label: 'Diurese', unit: 'ml', min: 0, max: 5000, integer: true },
+};
+const MEASUREMENT_TYPES = new Set(['pressao', ...Object.keys(SINGLE_VALUE_TYPES)]);
 const dbOf = (req: Request): any => req.app.locals['db'];
 const onlyDigits = (value: string): string => value.replace(/\D/g, '');
 export async function ensureBotIndexes(db: any): Promise<void> {
@@ -74,8 +86,7 @@ router.get('/residents', async (req, res) => {
 router.post('/measurements', async (req, res) => {
   const body = req.body ?? {};
   const { employeeId, residentId, type, value, measuredAt } = body;
-  const types = new Set(['pressao', 'glicemia', 'temperatura', 'saturacao']);
-  if (!ObjectId.isValid(String(employeeId)) || !ObjectId.isValid(String(residentId)) || !types.has(type) || typeof value !== 'string' || !value.trim() || typeof measuredAt !== 'string' || Number.isNaN(Date.parse(measuredAt))) return res.status(400).json({ ok: false, error: 'Payload invalido.' });
+  if (!ObjectId.isValid(String(employeeId)) || !ObjectId.isValid(String(residentId)) || !MEASUREMENT_TYPES.has(type) || typeof value !== 'string' || !value.trim() || typeof measuredAt !== 'string' || Number.isNaN(Date.parse(measuredAt))) return res.status(400).json({ ok: false, error: 'Payload invalido.' });
   try {
     const db = dbOf(req);
     if (!(await authorizedEmployee(db, String(employeeId)))) return res.status(403).json({ ok: false, error: 'Permissao insuficiente.' });
@@ -85,23 +96,34 @@ router.post('/measurements', async (req, res) => {
     ]);
     if (!patient || !user) return res.status(404).json({ ok: false, error: 'Registro nao encontrado.' });
     const now = new Date().toISOString();
-    const numeric = Number(value.replace(',', '.'));
-    const pressure = type === 'pressao' ? value.trim().match(/^(\d{2,3})\s*[/x]\s*(\d{2,3})$/i) : null;
-    const values = type === 'pressao' ? (pressure ? [Number(pressure[1]), Number(pressure[2])] : []) : [numeric];
-    const limits: Record<string, [number, number]> = { glicemia: [20, 700], temperatura: [30, 43], saturacao: [50, 100] };
-    if (!values.length || values.some((n) => !Number.isFinite(n)) || (type !== 'pressao' && (numeric < limits[type][0] || numeric > limits[type][1]))) return res.status(400).json({ ok: false, error: 'Valor fora do formato ou limite.' });
-    if (type === 'pressao' && (values[0] < 50 || values[0] > 250 || values[1] < 30 || values[1] > 150)) return res.status(400).json({ ok: false, error: 'Valor fora do formato ou limite.' });
+    let entries: { code: string; label: string; unit: string; numeric: number }[];
+    if (type === 'pressao') {
+      const pressure = value.trim().match(/^(\d{2,3})\s*[/x]\s*(\d{2,3})$/i);
+      const sys = pressure ? Number(pressure[1]) : NaN;
+      const dia = pressure ? Number(pressure[2]) : NaN;
+      if (!pressure || sys < 50 || sys > 250 || dia < 30 || dia > 150) return res.status(400).json({ ok: false, error: 'Valor fora do formato ou limite.' });
+      entries = [
+        { code: 'BP_SYS', label: 'Pressão Sistólica', unit: 'mmHg', numeric: sys },
+        { code: 'BP_DIA', label: 'Pressão Diastólica', unit: 'mmHg', numeric: dia },
+      ];
+    } else {
+      const config = SINGLE_VALUE_TYPES[type];
+      const numeric = Number(value.trim().replace(',', '.'));
+      if (!Number.isFinite(numeric) || numeric < config.min || numeric > config.max || (config.integer && !Number.isInteger(numeric))) return res.status(400).json({ ok: false, error: 'Valor fora do formato ou limite.' });
+      entries = [{ code: config.code, label: config.label, unit: config.unit, numeric }];
+    }
     const sessions = db.collection('measurement_session');
     const measurements = db.collection('measurement');
-    const code = type === 'pressao' ? ['BP_SYS', 'BP_DIA'] : [({ glicemia: 'GLUCOSE', temperatura: 'TEMP', saturacao: 'SPO2' } as Record<string, string>)[type]];
-    const sourceReference = `bot:${patient._id}:${employeeId}:${measuredAt}:${code.join(',')}:${values.join(',')}`;
+    const codes = entries.map((entry) => entry.code);
+    const values = entries.map((entry) => entry.numeric);
+    const sourceReference = `bot:${patient._id}:${employeeId}:${measuredAt}:${codes.join(',')}:${values.join(',')}`;
     const session = { patient_id: String(patient._id), patient_name: patient.display_name, measured_at: measuredAt, recorded_by_user_id: String(employeeId), source_type: 'manual', source_reference: sourceReference, status: 'active', recorded_at: now, recorded_by_name: [user.nome, user.sobrenome].filter(Boolean).join(' '), created_at: now, updated_at: now };
     const upserted = await sessions.findOneAndUpdate({ source_reference: sourceReference }, { $setOnInsert: session }, { upsert: true, returnDocument: 'after', includeResultMetadata: true });
     const inserted = upserted.value;
     if (!inserted) throw new Error('Sessao nao criada.');
     const alreadyHadSession = !upserted.lastErrorObject?.upserted;
     if (alreadyHadSession) return res.status(200).json({ id: String(inserted._id), employeeId, residentId, type, value, measuredAt, createdAt: inserted.created_at });
-    const docs = (type === 'pressao' ? values.map((n, i) => ({ type_code: code[i], type_label: i === 0 ? 'Pressão Sistólica' : 'Pressão Diastólica', value_numeric: n, unit: 'mmHg' })) : [{ type_code: code[0], type_label: type, value_numeric: numeric, unit: type === 'glicemia' ? 'mg/dL' : type === 'temperatura' ? '°C' : '%' }]).map((m) => ({ ...m, session_id: String(inserted._id), status: 'final', created_at: now, updated_at: now }));
+    const docs = entries.map((entry) => ({ type_code: entry.code, type_label: entry.label, value_numeric: entry.numeric, unit: entry.unit, session_id: String(inserted._id), status: 'final', created_at: now, updated_at: now }));
     try { await measurements.insertMany(docs); } catch (error) { await sessions.deleteOne({ _id: inserted._id, source_reference: sourceReference }).catch(() => undefined); throw error; }
     return res.status(201).json({ id: String(inserted._id), employeeId, residentId, type, value, measuredAt, createdAt: now });
   } catch { return res.status(500).json({ ok: false, error: 'Erro interno.' }); }
