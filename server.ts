@@ -5,6 +5,7 @@ import type { Application, ErrorRequestHandler } from 'express';
 import cronJobs from './src/cronJobs';
 import initRoutes from './src/routes';
 import { connect } from './src/config/mongoDB';
+import { ensureBotIndexes } from './src/routes/bot';
 
 async function bootstrap(): Promise<void> {
   if (!process.env.JWT_SECRET?.trim()) {
@@ -44,6 +45,7 @@ async function bootstrap(): Promise<void> {
   app.use(express.urlencoded({ limit: '10mb', extended: true }));
 
   app.locals['db'] = db;
+  await ensureBotIndexes(db);
 
   // O processo só começa a escutar depois que a conexão com o banco é validada.
   app.get('/health', (_req, res) => {
