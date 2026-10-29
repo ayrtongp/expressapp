@@ -2,8 +2,11 @@ import { Router, type Request } from 'express';
 import { ObjectId } from 'mongodb';
 import { requireBotToken } from '../middleware/botAuth';
 const router = Router();
-const CONTEXT_GROUPS = new Set(['medicina', 'equipe_enfermagem', 'coordenacao', 'financeiro']);
-const MEASUREMENT_GROUPS = new Set(['medicina', 'equipe_enfermagem', 'coordenacao']);
+const BOT_WHATSAPP_GROUP = 'bot_whatsapp';
+const BOT_COMMAND_GROUPS: Record<string, { group: string; permission: string; action: string }> = {
+  medicao: { group: 'bot_medicao', permission: 'medicao_avulsa', action: 'criar' },
+  financeiro: { group: 'bot_financeiro', permission: 'funcoes_financeiras', action: 'gerenciar' },
+};
 type SingleMeasurementType = { code: string; label: string; unit: string; min: number; max: number; integer?: boolean };
 const SINGLE_VALUE_TYPES: Record<string, SingleMeasurementType> = {
   glicemia: { code: 'GLUCOSE', label: 'Glicemia', unit: 'mg/dL', min: 20, max: 700 },
@@ -39,26 +42,32 @@ async function groupsForUser(db: any, userId: string): Promise<string[]> {
 }
 async function employeeContext(db: any, phone: string): Promise<{ userId: string; employeeName: string; permissions: Record<string, string[]> } | null> {
   const users = await db.collection('usuario').find({ ativo: { $in: ['S', true] } })
-    .project({ nome: 1, sobrenome: 1, telefone: 1, ativo: 1, admin: 1, funcao: 1 }).toArray();
+    .project({ nome: 1, sobrenome: 1, telefone: 1, ativo: 1, admin: 1 }).toArray();
   const user = users.find((row: any) => onlyDigits(String(row.telefone ?? '')) === onlyDigits(phone));
   if (!user) return null;
   const userId = String(user._id);
-  const groups = await groupsForUser(db, userId);
   const isAdmin = String(user.admin ?? '').trim().toUpperCase() === 'S';
-  const isFinanceDirector = String(user.funcao ?? '').trim().toLowerCase() === 'diretor financeiro';
-  if (!isAdmin && !isFinanceDirector && !groups.some((group) => CONTEXT_GROUPS.has(group))) return null;
+  const groups = await groupsForUser(db, userId);
+  if (!isAdmin && !groups.includes(BOT_WHATSAPP_GROUP)) return null;
   const permissions: Record<string, string[]> = {};
-  if (groups.some((group) => MEASUREMENT_GROUPS.has(group))) permissions.medicao_avulsa = ['criar'];
-  if (isAdmin) permissions.usuarios = ['gerenciar'];
-  if (isAdmin || isFinanceDirector || groups.includes('financeiro')) permissions.funcoes_financeiras = ['gerenciar'];
+  if (isAdmin) {
+    permissions.medicao_avulsa = ['criar'];
+    permissions.funcoes_financeiras = ['gerenciar'];
+    permissions.usuarios = ['gerenciar'];
+  } else {
+    for (const command of Object.values(BOT_COMMAND_GROUPS)) {
+      if (groups.includes(command.group)) permissions[command.permission] = [command.action];
+    }
+  }
   return { userId, employeeName: [user.nome, user.sobrenome].filter(Boolean).join(' '), permissions };
 }
 async function authorizedEmployee(db: any, userId: string): Promise<boolean> {
   if (!ObjectId.isValid(userId)) return false;
-  const user = await db.collection('usuario').findOne({ _id: new ObjectId(userId), ativo: { $in: ['S', true] } }, { projection: { _id: 1, admin: 1, funcao: 1 } });
+  const user = await db.collection('usuario').findOne({ _id: new ObjectId(userId), ativo: { $in: ['S', true] } }, { projection: { _id: 1, admin: 1 } });
   if (!user) return false;
+  if (String(user.admin ?? '').trim().toUpperCase() === 'S') return true;
   const groups = await groupsForUser(db, userId);
-  return groups.some((group) => MEASUREMENT_GROUPS.has(group));
+  return groups.includes(BOT_WHATSAPP_GROUP) && groups.includes(BOT_COMMAND_GROUPS.medicao.group);
 }
 router.use(requireBotToken);
 router.get('/context', async (req, res) => {

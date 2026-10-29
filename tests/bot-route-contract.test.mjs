@@ -5,6 +5,7 @@ import express from 'express';
 import { createServer } from 'node:http';
 import { ObjectId } from 'mongodb';
 import botModule from '../dist/src/routes/bot.js';
+import { planMigration, applyMigration, buildGroupDoc, NEW_GROUPS } from '../scripts/migrate-bot-groups.mjs';
 const botRouter = botModule.default;
 const route = fs.readFileSync(new URL('../src/routes/bot.ts', import.meta.url), 'utf8');
 test('pressao valida 120/80 e rejeita formatos fora do contrato', () => {
@@ -21,20 +22,19 @@ test('primeira gravação é atômica e concorrência usa chave única/upsert', 
   assert.doesNotMatch(route, /sessions\.createIndex/);
 });
 
-test('contexto autoriza não-CLT por role e nega usuário sem grupo', () => {
+test('contexto exige bot_whatsapp para não-admin; admin não depende de grupo', () => {
   assert.doesNotMatch(route, /employee\s*=\s*await db\.collection\('funcionarios_clt'\)/);
-  assert.match(route, /CONTEXT_GROUPS/);
-  assert.match(route, /diretor financeiro/);
-  assert.match(route, /isAdmin.*isFinanceDirector.*groups\.some\(\(group\) => CONTEXT_GROUPS\.has\(group\)\)/s);
+  assert.match(route, /BOT_WHATSAPP_GROUP = 'bot_whatsapp'/);
+  assert.match(route, /if \(!isAdmin && !groups\.includes\(BOT_WHATSAPP_GROUP\)\) return null/);
+  assert.doesNotMatch(route, /CONTEXT_GROUPS|MEASUREMENT_GROUPS/);
+  assert.doesNotMatch(route, /diretor financeiro/i);
 });
 
-test('allowlist explícita cobre cada role sem conceder acesso implícito', () => {
-  for (const role of ['medicina', 'equipe_enfermagem', 'coordenacao', 'financeiro']) {
-    assert.match(route, new RegExp(role));
-  }
-  assert.match(route, /permissions\.usuarios = \['gerenciar'\]/);
-  assert.match(route, /permissions\.funcoes_financeiras = \['gerenciar'\]/);
-  assert.match(route, /permissions\.medicao_avulsa = \['criar'\]/);
+test('mapa de comandos centraliza grupo→permissão sem acesso implícito por grupo de tela ou função', () => {
+  assert.match(route, /BOT_COMMAND_GROUPS/);
+  assert.match(route, /bot_medicao/);
+  assert.match(route, /bot_financeiro/);
+  assert.doesNotMatch(route, /'medicina'|'equipe_enfermagem'|'coordenacao'|'financeiro'/);
   assert.doesNotMatch(route, /funcionarios_clt/);
   assert.match(route, /ativo: \{ \$in: \['S', true\] \}/);
 });
@@ -45,33 +45,45 @@ test('medição consulta usuário ativo antes de aceitar grupos', () => {
   assert.match(authorized, /if \(!user\) return false/);
 });
 
-test('documentação mantém a matriz de autorização sem requisito CLT', () => {
+test('documentação mantém a matriz de autorização por grupos dedicados, sem CLT nem acesso implícito por grupo de tela', () => {
   const docs = fs.readFileSync(new URL('../docs/BOT-API.md', import.meta.url), 'utf8');
   assert.doesNotMatch(docs, /Só autoriza funcionários CLT/);
   assert.doesNotMatch(docs, /CLT|funcionarios_clt/i);
-  assert.match(docs, /admin=S.*usuarios\.gerenciar/s);
-  assert.match(docs, /Diretor Financeiro.*financeiro.*funcoes_financeiras/s);
-  assert.match(docs, /medicina.*equipe_enfermagem.*coordenacao.*medicao_avulsa/s);
+  assert.match(docs, /admin='S'.*usuarios\.gerenciar/s);
+  assert.match(docs, /bot_whatsapp/);
+  assert.match(docs, /bot_medicao.*medicao_avulsa\.criar/s);
+  assert.match(docs, /bot_financeiro.*funcoes_financeiras\.gerenciar/s);
+  assert.match(docs, /não concedem mais nada no bot/);
+  assert.match(docs, /migrate-bot-groups\.mjs/);
 });
 
-test('router real: contexto/medição com DB mockado e recusados sem insert', async () => {
+test('router real: matriz bot_whatsapp/bot_medicao/bot_financeiro com DB mockado e recusados sem insert', async () => {
   const employeeId = new ObjectId();
   const residentId = new ObjectId();
   const token = 'integration-test-token';
   const cases = [
-    ['admin S não-CLT', true, ['admin'], 200, 403], ['diretor financeiro não-CLT', true, ['diretor financeiro'], 200, 403], ['financeiro', true, ['financeiro'], 200, 403],
-    ['medicina não-CLT', true, ['medicina'], 200, 201], ['enfermagem não-CLT', true, ['equipe_enfermagem'], 200, 201],
-    ['coordenação não-CLT', true, ['coordenacao'], 200, 201],
-    ['sem grupo', true, [], null, 403], ['inativo', false, ['admin'], null, 403], ['role desconhecida', true, ['visitante'], null, 403],
+    ['admin sem grupos bot', true, true, [], { medicao_avulsa: ['criar'], funcoes_financeiras: ['gerenciar'], usuarios: ['gerenciar'] }, 201],
+    ['não admin bot_whatsapp+bot_medicao', true, false, ['bot_whatsapp', 'bot_medicao'], { medicao_avulsa: ['criar'] }, 201],
+    ['não admin só bot_whatsapp', true, false, ['bot_whatsapp'], {}, 403],
+    ['não admin medicina sem bot_whatsapp', true, false, ['medicina'], null, 403],
+    ['não admin equipe_enfermagem sem bot_whatsapp', true, false, ['equipe_enfermagem'], null, 403],
+    ['não admin bot_medicao sem bot_whatsapp', true, false, ['bot_medicao'], null, 403],
+    ['bot_financeiro', true, false, ['bot_whatsapp', 'bot_financeiro'], { funcoes_financeiras: ['gerenciar'] }, 403],
+    ['diretor financeiro sem bot_financeiro', true, false, ['bot_whatsapp'], {}, 403],
+    ['inativo', false, true, ['bot_whatsapp', 'bot_medicao'], null, 403],
+    ['sem grupo nenhum', true, false, [], null, 403],
   ];
-  for (const [name, active, roles, contextStatus, measurementStatus] of cases) {
+  for (const [name, active, isAdmin, groups, expectedPermissions, measurementStatus] of cases) {
     let inserts = 0;
     const db = { collection(name) {
-      if (name === 'usuario') return { find: () => ({ project: () => ({ toArray: async () => active ? [{ _id: employeeId, nome: 'Ayrton', sobrenome: 'Teste', telefone: '21999999999', ativo: true, admin: roles.includes('admin') ? 'S' : 'N', funcao: roles.includes('diretor financeiro') ? 'Diretor Financeiro' : '' }] : [] }) }), findOne: async (q) => q._id?.equals?.(employeeId) && active ? { _id: employeeId, nome: 'Ayrton', sobrenome: 'Teste', admin: roles.includes('admin') ? 'S' : 'N', funcao: roles.includes('diretor financeiro') ? 'Diretor Financeiro' : '' } : null };
-      if (name === 'grupos_usuario') return { find: () => ({ project: () => ({ toArray: async () => roles.length ? [{ id_grupo: new ObjectId('507f1f77bcf86cd799439011') }] : [] }) }) };
-      if (name === 'grupos') return { find: () => ({ project: () => ({ toArray: async () => roles.filter((r) => !['admin', 'diretor financeiro'].includes(r)).map((cod_grupo) => ({ cod_grupo })) }) }) };
+      if (name === 'usuario') return {
+        find: () => ({ project: () => ({ toArray: async () => active ? [{ _id: employeeId, nome: 'Ayrton', sobrenome: 'Teste', telefone: '21999999999', ativo: true, admin: isAdmin ? 'S' : 'N' }] : [] }) }),
+        findOne: async (q) => (q._id?.equals?.(employeeId) && active) ? { _id: employeeId, admin: isAdmin ? 'S' : 'N' } : null,
+      };
+      if (name === 'grupos_usuario') return { find: () => ({ project: () => ({ toArray: async () => groups.length ? [{ id_grupo: new ObjectId('507f1f77bcf86cd799439011') }] : [] }) }) };
+      if (name === 'grupos') return { find: () => ({ project: () => ({ toArray: async () => groups.map((cod_grupo) => ({ cod_grupo })) }) }) };
       if (name === 'patient') return { findOne: async () => ({ _id: residentId, display_name: 'Residente Teste' }) };
-      if (name === 'measurement_session') return { createIndex: async () => undefined, findOneAndUpdate: async () => ({ value: { _id: new ObjectId(), created_at: new Date().toISOString() }, lastErrorObject: { upserted: new ObjectId() } }) };
+      if (name === 'measurement_session') return { findOneAndUpdate: async () => ({ value: { _id: new ObjectId(), created_at: new Date().toISOString() }, lastErrorObject: { upserted: new ObjectId() } }) };
       if (name === 'measurement') return { insertMany: async () => { inserts += 1; } };
       throw new Error(`collection inesperada: ${name}`);
     }};
@@ -80,12 +92,14 @@ test('router real: contexto/medição com DB mockado e recusados sem insert', as
     const base = `http://127.0.0.1:${server.address().port}`;
     process.env.BOT_SERVICE_TOKEN = token;
     const context = await fetch(`${base}/api/bot/context?phone=21999999999`, { headers: { Authorization: `Bearer ${token}` } });
+    const contextBody = await context.json();
     const measurement = await fetch(`${base}/api/bot/measurements`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ employeeId: String(employeeId), residentId: String(residentId), type: 'glicemia', value: '100', measuredAt: '2026-01-01T10:00:00.000Z' }) });
     await new Promise((resolve) => server.close(resolve));
     assert.equal(context.status, 200, `${name}: context HTTP`);
-    assert.equal((await context.json()) === null ? null : 200, contextStatus, `${name}: context body`);
+    if (expectedPermissions === null) assert.equal(contextBody, null, `${name}: context deveria ser null`);
+    else assert.deepEqual(contextBody?.permissions, expectedPermissions, `${name}: permissoes`);
     assert.equal(measurement.status, measurementStatus, `${name}: measurement`);
-    assert.equal(inserts, measurementStatus === 201 ? 1 : 0, `${name}: rejected request inserted data`);
+    assert.equal(inserts, measurementStatus === 201 ? 1 : 0, `${name}: recusado nao deve inserir`);
   }
 });
 
@@ -145,4 +159,100 @@ test('documentação lista os 9 tipos de medição com type_code e unit do catá
   for (const code of ['BP_SYS', 'BP_DIA', 'GLUCOSE', 'TEMP', 'SPO2', 'HR', 'RR', 'WEIGHT', 'PAIN_SCORE', 'DIURESIS']) {
     assert.match(docs, new RegExp(code), `docs devem citar ${code}`);
   }
+});
+
+function matchesFilter(doc, filter = {}) {
+  return Object.entries(filter).every(([key, cond]) => {
+    const value = doc[key];
+    if (cond && typeof cond === 'object') {
+      if ('$in' in cond) return cond.$in.some((v) => String(v) === String(value));
+      if ('$ne' in cond) return String(value) !== String(cond.$ne);
+      return false;
+    }
+    return String(value) === String(cond);
+  });
+}
+function makeMockMigrationDb(data) {
+  return { collection(name) {
+    const store = data[name];
+    return {
+      find(filter = {}) {
+        const results = store.filter((doc) => matchesFilter(doc, filter));
+        return { project: () => ({ toArray: async () => results.map((d) => ({ ...d })) }) };
+      },
+      findOne: async (filter = {}) => { const doc = store.find((d) => matchesFilter(d, filter)); return doc ? { ...doc } : null; },
+      insertOne: async (doc) => { const _id = new ObjectId(); store.push({ _id, ...doc }); return { insertedId: _id }; },
+      insertMany: async (docs) => { const insertedIds = []; for (const doc of docs) { const _id = new ObjectId(); store.push({ _id, ...doc }); insertedIds.push(_id); } return { insertedIds }; },
+    };
+  } };
+}
+
+test('migração bot_whatsapp: dry-run só conta, não grava', async () => {
+  const medicinaId = new ObjectId();
+  const financeiroId = new ObjectId();
+  const userClinico = new ObjectId();
+  const userFinanceiroFuncao = new ObjectId();
+  const userFinanceiroGrupo = new ObjectId();
+  const data = {
+    grupos: [
+      { _id: medicinaId, cod_grupo: 'medicina', nome: 'Medicina' },
+      { _id: financeiroId, cod_grupo: 'financeiro', nome: 'Financeiro' },
+    ],
+    grupos_usuario: [
+      { id_usuario: userClinico, id_grupo: medicinaId },
+      { id_usuario: userFinanceiroGrupo, id_grupo: financeiroId },
+    ],
+    usuario: [
+      { _id: userClinico, ativo: true, admin: 'N', telefone: '21911111111', funcao: '' },
+      { _id: userFinanceiroFuncao, ativo: true, admin: 'N', telefone: '21922222222', funcao: 'Diretor Financeiro' },
+      { _id: userFinanceiroGrupo, ativo: true, admin: 'N', telefone: '21944444444', funcao: '' },
+      { _id: new ObjectId(), ativo: true, admin: 'S', telefone: '21933333333', funcao: '' },
+      { _id: new ObjectId(), ativo: true, admin: 'N', telefone: '', funcao: '' },
+      { _id: new ObjectId(), ativo: false, admin: 'N', telefone: '21955555555', funcao: 'Diretor Financeiro' },
+      { _id: new ObjectId(), ativo: true, admin: 'N', telefone: '21966666666', funcao: '' },
+    ],
+  };
+  const db = makeMockMigrationDb(data);
+  const plan = await planMigration(db);
+  assert.equal(plan.groupsToCreate.length, NEW_GROUPS.length, 'deveria precisar criar os 3 grupos novos');
+  assert.equal(plan.linksToCreate.length, 6, 'clínico + diretor financeiro por função + financeiro por grupo = 3 usuários x 2 vínculos');
+  assert.equal(data.grupos.length, 2, 'dry-run não deve gravar grupos');
+  assert.equal(data.grupos_usuario.length, 2, 'dry-run não deve gravar vínculos');
+});
+
+test('migração bot_whatsapp: --apply cria grupos e vínculos uma vez; segunda execução não altera nada', async () => {
+  const medicinaId = new ObjectId();
+  const userClinico = new ObjectId();
+  const data = {
+    grupos: [{ _id: medicinaId, cod_grupo: 'medicina', nome: 'Medicina' }],
+    grupos_usuario: [{ id_usuario: userClinico, id_grupo: medicinaId }],
+    usuario: [{ _id: userClinico, ativo: true, admin: 'N', telefone: '21911111111', funcao: '' }],
+  };
+  const db = makeMockMigrationDb(data);
+  const firstPlan = await planMigration(db);
+  const firstResult = await applyMigration(db, firstPlan);
+  assert.equal(firstResult.groupsCreated, 3, 'deveria criar os 3 grupos novos');
+  assert.equal(firstResult.linksCreated, 2, 'deveria criar bot_whatsapp + bot_medicao para o usuário clínico');
+  assert.equal(data.grupos.length, 4);
+  assert.equal(data.grupos_usuario.length, 3);
+  const createdGroupCodes = data.grupos.map((g) => g.cod_grupo).sort();
+  assert.deepEqual(createdGroupCodes, ['bot_financeiro', 'bot_medicao', 'bot_whatsapp', 'medicina'].sort());
+
+  const secondPlan = await planMigration(db);
+  assert.equal(secondPlan.groupsToCreate.length, 0, 'segunda execução não deve recriar grupos');
+  assert.equal(secondPlan.linksToCreate.length, 0, 'segunda execução não deve duplicar vínculos');
+  const secondResult = await applyMigration(db, secondPlan);
+  assert.equal(secondResult.groupsCreated, 0);
+  assert.equal(secondResult.linksCreated, 0);
+  assert.equal(data.grupos.length, 4, 'contagem de grupos não muda na segunda execução');
+  assert.equal(data.grupos_usuario.length, 3, 'contagem de vínculos não muda na segunda execução');
+});
+
+test('migração bot_whatsapp: novo grupo copia o formato do grupo existente (cod_grupo/nome) sem herdar _id', () => {
+  const sample = { _id: new ObjectId(), cod_grupo: 'medicina', nome: 'Medicina', ativo: true };
+  const doc = buildGroupDoc(sample, 'bot_whatsapp', 'Bot WhatsApp');
+  assert.equal(doc.cod_grupo, 'bot_whatsapp');
+  assert.equal(doc.nome, 'Bot WhatsApp');
+  assert.equal(doc.ativo, true);
+  assert.equal('_id' in doc, false);
 });
