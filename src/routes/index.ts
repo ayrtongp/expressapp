@@ -10,8 +10,10 @@ import * as AiController from '../controller/ai.controller';
 import r2Routes from '../r2/routes';
 import { requireAnyGroup, requireAuth } from '../middleware/auth';
 import { aiRateLimit, portaoRateLimit } from '../middleware/rateLimit';
+import botRoutes from './bot';
 
 const router = Router();
+router.use('/api/bot', botRoutes);
 
 // ------------------- CLOUDFLARE R2 + MONGODB -------------------
 // Rotas definidas em src/r2/routes.ts
