@@ -9,6 +9,12 @@
 //      patients já existentes). Não grava `usuario_id`, nem CPF/telefone/endereço.
 //   2) `idoso_detalhes` com `patient_id` e `status` derivado de `is_ativo`.
 //   3) `patient.idoso_detalhes_id` = id do idoso_detalhes criado.
+//
+// `admissao.modalidadePrincipal` fica AUSENTE de propósito: `residentes` não tem
+// campo equivalente (nem `modalidade`, nem `tipoVaga`/`tipo_vaga`; conferido no
+// tipo `Residente`, no formulário legado e no `ResidentesController`). Não se
+// inventa default `residencia_fixa` — o dry-run lista a pendência por alvo para
+// o operador preencher na ficha depois.
 // NUNCA cria `usuario`, NUNCA altera `residentes`, prescrições, sinais vitais,
 // anotações ou qualquer outro documento.
 //
@@ -189,6 +195,17 @@ export async function planCreation(db, alvos = ALVOS) {
 
     const patientId = new ObjectId();
     const idosoId = new ObjectId();
+    const now = new Date().toISOString();
+    const patientDoc = buildPatientDoc(residente, patientId, now);
+    const idosoDoc = buildIdosoDoc(residente, patientId, idosoId, now);
+
+    // Pendências conhecidas do cadastro novo, mostradas antes do --apply.
+    // Nada é inferido/preenchido: o operador ajusta na ficha.
+    const pendencias = [];
+    if (!idosoDoc.admissao?.modalidadePrincipal) {
+      pendencias.push('modalidadePrincipal em branco — preencher na ficha');
+    }
+
     alvosPlano.push({
       nome,
       residenteId,
@@ -198,10 +215,11 @@ export async function planCreation(db, alvos = ALVOS) {
       idosoDetalhesIdPlanejado: hex(idosoId),
       camposPatient: PATIENT_FIELDS,
       camposIdoso: IDOSO_FIELDS,
+      pendencias,
       // Documentos completos para o apply; nunca impressos crus (têm nome/nascimento).
       _residente: residente,
-      _patient: buildPatientDoc(residente, patientId, new Date().toISOString()),
-      _idoso: buildIdosoDoc(residente, patientId, idosoId, new Date().toISOString()),
+      _patient: patientDoc,
+      _idoso: idosoDoc,
     });
   }
 
@@ -242,15 +260,34 @@ export async function applyCreation(db, plan) {
       }
 
       await patientCol.insertOne(alvo._patient);
+      let idosoInserido = false;
       try {
         await idosoCol.insertOne(alvo._idoso);
+        idosoInserido = true;
         await patientCol.updateOne(
           { _id: alvo._patient._id },
           { $set: { idoso_detalhes_id: hex(alvo._idoso._id) } },
         );
       } catch (error) {
-        // Desfaz o patient recém-criado para não deixar meia ligação.
-        await patientCol.deleteOne({ _id: alvo._patient._id });
+        // Desfaz o que já foi inserido, na ordem inversa (idoso_detalhes → patient),
+        // para não deixar idoso_detalhes órfão. Sem isso, a próxima execução não
+        // pularia (o patient sumiu) e criaria um segundo idoso_detalhes.
+        const limpeza = [];
+        if (idosoInserido) {
+          try {
+            await idosoCol.deleteOne({ _id: alvo._idoso._id });
+          } catch (cleanupError) {
+            limpeza.push(`idoso_detalhes ${hex(alvo._idoso._id)}: ${cleanupError?.message ?? 'erro'}`);
+          }
+        }
+        try {
+          await patientCol.deleteOne({ _id: alvo._patient._id });
+        } catch (cleanupError) {
+          limpeza.push(`patient ${hex(alvo._patient._id)}: ${cleanupError?.message ?? 'erro'}`);
+        }
+        if (limpeza.length > 0) {
+          throw new Error(`${error?.message ?? 'erro desconhecido'}; limpeza incompleta: ${limpeza.join('; ')}`);
+        }
         throw error;
       }
 
@@ -280,6 +317,7 @@ function publicPlan(plan) {
       idosoDetalhesIdPlanejado: alvo.idosoDetalhesIdPlanejado,
       camposPatient: alvo.camposPatient,
       camposIdoso: alvo.camposIdoso,
+      pendencias: alvo.pendencias,
     })),
     resumo: summarizePlan(plan),
     erros: plan.erros,

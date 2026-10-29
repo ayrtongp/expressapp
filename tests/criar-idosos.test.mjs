@@ -24,8 +24,9 @@ function matchesFilter(doc, filter = {}) {
   });
 }
 
-function makeMockDb(data) {
+function makeMockDb(data, options = {}) {
   const writes = [];
+  const failUpdateOn = { ...(options.failUpdateOn ?? {}) };
   const db = {
     writes,
     data,
@@ -54,6 +55,12 @@ function makeMockDb(data) {
           return { insertedId: doc._id };
         },
         async updateOne(filter, update) {
+          const failures = failUpdateOn[name] ?? 0;
+          if (failures > 0) {
+            failUpdateOn[name] = failures - 1;
+            writes.push({ op: 'update-fail', collection: name });
+            throw new Error('falha injetada no updateOne');
+          }
           const doc = store.find((item) => matchesFilter(item, filter));
           if (!doc) return { matchedCount: 0, modifiedCount: 0 };
           writes.push({ op: 'update', collection: name, id: String(doc._id) });
@@ -236,4 +243,74 @@ test('saída pública não expõe CPF/telefone/endereço (só nomes, ids e conta
   assert.doesNotMatch(texto, /21999998888/);
   assert.doesNotMatch(texto, /Rua Sigilosa/);
   assert.match(texto, new RegExp(ALVOS[0]));
+});
+
+test('falha no updateOne: desfaz idoso_detalhes e patient na ordem inversa, sem órfão', async () => {
+  const alvoA = residente(ALVOS[0]);
+  const alvoB = residente(ALVOS[1]);
+  // Falha só o primeiro updateOne de patient (ligação patient.idoso_detalhes_id).
+  const db = makeMockDb(
+    { residentes: [alvoA, alvoB], patient: [], idoso_detalhes: [] },
+    { failUpdateOn: { patient: 1 } },
+  );
+
+  const plan = await planCreation(db);
+  const resultado = await applyCreation(db, plan);
+
+  assert.equal(resultado.falhas.length, 1);
+  assert.match(resultado.falhas[0], /falha injetada no updateOne/);
+  assert.equal(resultado.criados.length, 1, 'o outro alvo deve ser criado normalmente');
+
+  // Nenhum resíduo do alvo que falhou: nem patient, nem idoso_detalhes órfão.
+  const falho = plan.alvos[0];
+  assert.equal(
+    db.data.patient.some((p) => String(p._id) === falho.patientIdPlanejado),
+    false,
+    'patient do alvo que falhou deve ser removido',
+  );
+  assert.equal(
+    db.data.idoso_detalhes.some((i) => String(i._id) === falho.idosoDetalhesIdPlanejado),
+    false,
+    'idoso_detalhes do alvo que falhou deve ser removido',
+  );
+  assert.equal(db.data.idoso_detalhes.length, 1);
+  const unicoIdoso = db.data.idoso_detalhes[0];
+  assert.ok(
+    db.data.patient.some((p) => String(p._id) === unicoIdoso.patient_id),
+    'o único idoso_detalhes restante tem patient correspondente',
+  );
+
+  // Ordem da limpeza: remove idoso_detalhes antes de patient.
+  const deletesDoAlvo = db.writes.filter(
+    (w) => w.op === 'delete' &&
+      (w.id === falho.idosoDetalhesIdPlanejado || w.id === falho.patientIdPlanejado),
+  );
+  assert.deepEqual(
+    deletesDoAlvo.map((w) => w.collection),
+    ['idoso_detalhes', 'patient'],
+  );
+
+  // Reexecução: recria só o que faltou e NÃO duplica o idoso_detalhes do outro alvo.
+  const segundoPlano = await planCreation(db);
+  assert.deepEqual(summarizePlan(segundoPlano), { aCriar: 1, pulados: 1, abortados: 0 });
+  const segundaExecucao = await applyCreation(db, segundoPlano);
+
+  assert.equal(segundaExecucao.criados.length, 1);
+  assert.equal(segundaExecucao.falhas.length, 0);
+  assert.equal(db.data.patient.length, 2);
+  assert.equal(db.data.idoso_detalhes.length, 2);
+  assert.equal(new Set(db.data.idoso_detalhes.map((i) => String(i.patient_id))).size, 2);
+});
+
+test('dry-run avisa a pendência de modalidadePrincipal sem preencher o campo', async () => {
+  const db = makeMockDb({ residentes: [residente(ALVOS[0])], patient: [], idoso_detalhes: [] });
+
+  const plan = await planCreation(db);
+  const alvo = plan.alvos[0];
+
+  assert.equal(alvo.status, 'criar');
+  assert.deepEqual(alvo.pendencias, ['modalidadePrincipal em branco — preencher na ficha']);
+  // Nada de default inventado: o campo continua ausente no documento a gravar.
+  assert.equal(alvo._idoso.admissao.modalidadePrincipal, undefined);
+  assert.equal(db.writes.length, 0);
 });
