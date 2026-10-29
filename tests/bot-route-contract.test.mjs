@@ -5,7 +5,7 @@ import express from 'express';
 import { createServer } from 'node:http';
 import { ObjectId } from 'mongodb';
 import botModule from '../dist/src/routes/bot.js';
-import { planMigration, applyMigration, buildGroupDoc, NEW_GROUPS } from '../scripts/migrate-bot-groups.mjs';
+import { planMigration, applyMigration, buildGroupDoc, buildLinkDoc, NEW_GROUPS } from '../scripts/migrate-bot-groups.mjs';
 const botRouter = botModule.default;
 const route = fs.readFileSync(new URL('../src/routes/bot.ts', import.meta.url), 'utf8');
 test('pressao valida 120/80 e rejeita formatos fora do contrato', () => {
@@ -248,11 +248,86 @@ test('migração bot_whatsapp: --apply cria grupos e vínculos uma vez; segunda 
   assert.equal(data.grupos_usuario.length, 3, 'contagem de vínculos não muda na segunda execução');
 });
 
-test('migração bot_whatsapp: novo grupo copia o formato do grupo existente (cod_grupo/nome) sem herdar _id', () => {
-  const sample = { _id: new ObjectId(), cod_grupo: 'medicina', nome: 'Medicina', ativo: true };
+test('migração bot_whatsapp: novo grupo só copia cod_grupo/nome/timestamps, nunca telas/permissões/membros', () => {
+  const sample = {
+    _id: new ObjectId(),
+    cod_grupo: 'medicina',
+    nome: 'Medicina',
+    created_at: new Date('2020-01-01T00:00:00.000Z'),
+    telas: ['residentes', 'medicoes', 'financeiro'],
+    permissoes: { financeiro: ['ver', 'editar'] },
+    membros: [new ObjectId()],
+  };
   const doc = buildGroupDoc(sample, 'bot_whatsapp', 'Bot WhatsApp');
   assert.equal(doc.cod_grupo, 'bot_whatsapp');
   assert.equal(doc.nome, 'Bot WhatsApp');
-  assert.equal(doc.ativo, true);
+  assert.ok(doc.created_at instanceof Date, 'timestamp deve ser copiado (com novo valor)');
   assert.equal('_id' in doc, false);
+  assert.equal('telas' in doc, false, 'telas do grupo de exemplo nao pode ser copiado');
+  assert.equal('permissoes' in doc, false, 'permissoes do grupo de exemplo nao pode ser copiado');
+  assert.equal('membros' in doc, false, 'membros do grupo de exemplo nao pode ser copiado');
+});
+
+test('migração bot_whatsapp: vínculo novo só copia id_usuario/id_grupo/timestamps, no mesmo tipo do vínculo existente', () => {
+  const userId = new ObjectId();
+  const groupId = new ObjectId();
+  const sampleObjectIdLink = { _id: new ObjectId(), id_usuario: new ObjectId(), id_grupo: new ObjectId(), created_at: new Date(), observacao: 'não deve ser copiado' };
+  const docA = buildLinkDoc(sampleObjectIdLink, userId, groupId);
+  assert.ok(docA.id_usuario instanceof ObjectId, 'id_usuario deve ser ObjectId quando o vínculo existente usa ObjectId');
+  assert.ok(docA.id_grupo instanceof ObjectId, 'id_grupo deve ser ObjectId quando o vínculo existente usa ObjectId');
+  assert.equal('observacao' in docA, false, 'campo desconhecido do vínculo de exemplo nao pode ser copiado');
+  assert.equal('_id' in docA, false);
+
+  const sampleStringLink = { _id: new ObjectId(), id_usuario: String(new ObjectId()), id_grupo: String(new ObjectId()) };
+  const docB = buildLinkDoc(sampleStringLink, userId, groupId);
+  assert.equal(typeof docB.id_usuario, 'string', 'id_usuario deve ser string quando o vínculo existente usa string');
+  assert.equal(typeof docB.id_grupo, 'string', 'id_grupo deve ser string quando o vínculo existente usa string');
+  assert.equal(docB.id_usuario, String(userId));
+  assert.equal(docB.id_grupo, String(groupId));
+});
+
+test('migração bot_whatsapp: migra usuários mesmo quando grupos_usuario guarda id_usuario/id_grupo como string', async () => {
+  const medicinaId = new ObjectId();
+  const userClinico = new ObjectId();
+  const data = {
+    grupos: [{ _id: medicinaId, cod_grupo: 'medicina', nome: 'Medicina' }],
+    grupos_usuario: [{ id_usuario: String(userClinico), id_grupo: String(medicinaId) }],
+    usuario: [{ _id: userClinico, ativo: true, admin: 'N', telefone: '21911111111', funcao: '' }],
+  };
+  const db = makeMockMigrationDb(data);
+  const plan = await planMigration(db);
+  assert.equal(plan.linksToCreate.length, 2, 'bot_whatsapp + bot_medicao mesmo com ids em string');
+  assert.equal(plan.linksByGroup.bot_whatsapp, 1);
+  assert.equal(plan.linksByGroup.bot_medicao, 1);
+  assert.equal(plan.linksByGroup.bot_financeiro, 0);
+
+  const result = await applyMigration(db, plan);
+  assert.equal(result.linksCreated, 2);
+  const newLinks = data.grupos_usuario.filter((l) => String(l.id_usuario) === String(userClinico) && l.id_grupo !== String(medicinaId));
+  assert.equal(newLinks.length, 2);
+  for (const link of newLinks) assert.equal(typeof link.id_usuario, 'string', 'novo vínculo deve usar string, como o vínculo existente');
+
+  const secondPlan = await planMigration(db);
+  assert.equal(secondPlan.linksToCreate.length, 0, 'segunda execução não deve duplicar vínculos em string');
+});
+
+test('migração: reporta campos/tipos do sampleGroup/sampleLink e contagem por grupo, sem dados pessoais', async () => {
+  const medicinaId = new ObjectId();
+  const userClinico = new ObjectId();
+  const data = {
+    grupos: [{ _id: medicinaId, cod_grupo: 'medicina', nome: 'Medicina' }],
+    grupos_usuario: [{ id_usuario: userClinico, id_grupo: medicinaId, created_at: new Date() }],
+    usuario: [{ _id: userClinico, ativo: true, admin: 'N', telefone: '21911111111', funcao: '' }],
+  };
+  const db = makeMockMigrationDb(data);
+  const plan = await planMigration(db);
+  assert.deepEqual(plan.sampleGroupFields, { cod_grupo: 'string', nome: 'string' });
+  assert.deepEqual(plan.sampleLinkFields, { id_usuario: 'ObjectId', id_grupo: 'ObjectId', created_at: 'Date' });
+  assert.deepEqual(plan.linksByGroup, { bot_whatsapp: 1, bot_medicao: 1, bot_financeiro: 0 });
+});
+
+test('migração: invocação via stdin (argv[1] === "-") deve ser reconhecida para rodar main()', () => {
+  const script = fs.readFileSync(new URL('../scripts/migrate-bot-groups.mjs', import.meta.url), 'utf8');
+  assert.match(script, /invokedPath === '-'/);
+  assert.match(script, /invokedPath === undefined/);
 });
