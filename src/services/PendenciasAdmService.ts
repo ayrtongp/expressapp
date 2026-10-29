@@ -54,7 +54,7 @@ export async function buildPendenciasAdmMensagem(db: Db): Promise<string> {
 
   // Buscar usuarios para nome + foto
   const userIds = clts.map(c => c.usuarioId?.toString()).filter(Boolean);
-  const objIds = userIds.map(id => { try { return new ObjectId(id); } catch { return null; } }).filter(Boolean);
+  const objIds = userIds.map(id => { try { return new ObjectId(id); } catch { return null; } }).filter((id): id is ObjectId => id !== null);
 
   const usuarios = await db
     .collection('usuario')
